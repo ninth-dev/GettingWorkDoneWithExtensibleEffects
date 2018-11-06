@@ -8,7 +8,6 @@ import scala.collection.SortedSet
 import cats._
 import cats.implicits._
 
-
 object Scanner {
 
   def main(args: Array[String]): Unit = {
@@ -48,7 +47,13 @@ object PathScan {
   def topNMonoid(n: Int): Monoid[PathScan] = new Monoid[PathScan] {
     def empty: PathScan = PathScan.empty
 
-    def combine(p1: PathScan, p2: PathScan): PathScan = ???
+    def combine(p1: PathScan, p2: PathScan): PathScan =
+      PathScan(
+        p1.largestFiles ++ p2.largestFiles take n,
+        p1.totalSize + p2.totalSize,
+        p2.totalCount + p2.totalCount
+      )
+
   }
 
 }
@@ -61,7 +66,8 @@ object FileSize {
     FileSize(file, Files.size(file))
   }
 
-  implicit val ordering: Ordering[FileSize] = Ordering.by[FileSize, Long  ](_.size).reverse
+  implicit val ordering: Ordering[FileSize] =
+    Ordering.by[FileSize, Long](_.size).reverse
 
 }
 //I prefer an closed set of disjoint cases over a series of isX(): Boolean tests, as provided by the Java API
@@ -84,17 +90,19 @@ case class File(path: String) extends FilePath
 case class Directory(path: String) extends FilePath
 case class Other(path: String) extends FilePath
 
-
 //Common pure code that is unaffected by the migration to Eff
 object ReportFormat {
 
   def largeFilesReport(scan: PathScan, rootDir: String): String = {
     if (scan.largestFiles.nonEmpty) {
       s"Largest ${scan.largestFiles.size} file(s) found under path: $rootDir\n" +
-        scan.largestFiles.map(fs => s"${(fs.size * 100)/scan.totalSize}%  ${formatByteString(fs.size)}  ${fs.path}").mkString("", "\n", "\n") +
+        scan.largestFiles
+          .map(
+            fs => s"${(fs.size * 100) / scan.totalSize}%  ${formatByteString(fs.size)}  ${fs.path}"
+          )
+          .mkString("", "\n", "\n") +
         s"${scan.totalCount} total files found, having total size ${formatByteString(scan.totalSize)} bytes.\n"
-    }
-    else
+    } else
       s"No files found under path: $rootDir"
   }
 
