@@ -13,16 +13,18 @@ import monix.execution._
 
 import scala.concurrent.duration._
 
-
 object Scanner {
+  implicit val s = Scheduler(ExecutionModel.BatchedExecution(32))
+  def main(args: Array[String]): Unit =
+    scanReport(Paths.get(args(0)), 10)
+      .map(println)
+      .runSyncUnsafe(1.minute)
 
-  def main(args: Array[String]): Unit = {
-    val program = scanReport(Paths.get(args(0)), 10).map(println)
-  }
 
-  def scanReport(base: Path, topN: Int): Task[String] = for {
-    scan <- pathScan(FilePath(base), topN)
-  } yield ReportFormat.largeFilesReport(scan, base.toString)
+  def scanReport(base: Path, topN: Int): Task[String] =
+    for {
+      scan <- pathScan(FilePath(base), topN)
+    } yield ReportFormat.largeFilesReport(scan, base.toString)
 
   def pathScan(filePath: FilePath, topN: Int): Task[PathScan] = filePath match {
     case File(path) =>
@@ -37,7 +39,8 @@ object Scanner {
           try jstream.toScala[List]
           finally jstream.close()
         }
-        scans <- files.map(subpath => pathScan(FilePath(subpath), topN))
+        // pathScan is
+        scans <- files.traverse(subpath => pathScan(FilePath(subpath), topN))
       } yield scans.combineAll(PathScan.topNMonoid(topN))
     case Other(_) =>
       Task(PathScan.empty)
@@ -71,7 +74,7 @@ object FileSize {
     FileSize(file, Files.size(file))
   }
 
-  implicit val ordering: Ordering[FileSize] = Ordering.by[FileSize, Long  ](_.size).reverse
+  implicit val ordering: Ordering[FileSize] = Ordering.by[FileSize, Long](_.size).reverse
 
 }
 //I prefer an closed set of disjoint cases over a series of isX(): Boolean tests, as provided by the Java API
@@ -100,10 +103,13 @@ object ReportFormat {
   def largeFilesReport(scan: PathScan, rootDir: String): String = {
     if (scan.largestFiles.nonEmpty) {
       s"Largest ${scan.largestFiles.size} file(s) found under path: $rootDir\n" +
-        scan.largestFiles.map(fs => s"${(fs.size * 100)/scan.totalSize}%  ${formatByteString(fs.size)}  ${fs.path}").mkString("", "\n", "\n") +
+        scan.largestFiles
+          .map(
+            fs => s"${(fs.size * 100) / scan.totalSize}%  ${formatByteString(fs.size)}  ${fs.path}"
+          )
+          .mkString("", "\n", "\n") +
         s"${scan.totalCount} total files found, having total size ${formatByteString(scan.totalSize)} bytes.\n"
-    }
-    else
+    } else
       s"No files found under path: $rootDir"
   }
 
