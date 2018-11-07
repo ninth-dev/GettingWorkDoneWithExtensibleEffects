@@ -2,7 +2,7 @@ name := "GettingWorkDoneWithExtensibleEffects"
 
 version := "0.1"
 
-ThisBuild / scalaVersion := "2.12.5"
+ThisBuild / scalaVersion := "2.12.7"
 
 val commonSettings = Seq(
   libraryDependencies ++= Seq(
