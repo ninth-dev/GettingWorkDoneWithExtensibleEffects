@@ -22,11 +22,17 @@ import monix.execution.Scheduler.Implicits.global
 
 class ScannerSpec extends mutable.Specification {
 
-  case class MockFilesystem(directories: Map[Directory, List[FilePath]], fileSizes: Map[File, Long]) extends Filesystem {
+  case class MockFilesystem(
+      directories: Map[Directory, List[FilePath]],
+      fileSizes: Map[File, Long]
+  ) extends Filesystem {
 
-    def length(file: File) = fileSizes.getOrElse(file, throw new IOException())
+    def length(file: File): Long = fileSizes.getOrElse(file, throw new IOException())
 
-    def listFiles(directory: Directory) = directories.getOrElse(directory, throw new IOException())
+    def listFiles(directory: Directory): List[FilePath] = directories.getOrElse(
+      directory,
+      throw new IOException()
+    )
 
     def filePath(path: String): FilePath =
       if (directories.keySet.contains(Directory(path)))
@@ -48,25 +54,30 @@ class ScannerSpec extends mutable.Specification {
     subdir -> List(sub1, sub3)
   )
   val fileSizes = Map(base1 -> 1L, base2 -> 2L, sub1 -> 1L, sub3 -> 3L)
-  val fs = MockFilesystem(directories, fileSizes)
+  val fileSystemMock = MockFilesystem(directories, fileSizes)
 
   type R = Fx.fx3[Task, Reader[Filesystem, ?], Reader[ScanConfig, ?]]
 
   def run[T](program: Eff[R, T], fs: Filesystem) =
-    program.runReader(ScanConfig(2)).runReader(fs).runAsync.attempt.runSyncUnsafe(3.seconds)
+    program
+      .runReader(ScanConfig(2))
+      .runReader(fs)
+      .runAsync
+      .attempt
+      .runSyncUnsafe(3.seconds)
 
   "file scan" ! {
-    val actual = run(Scanner.pathScan(base), fs)
+    val actual = run(Scanner.pathScan(base), fileSystemMock)
     val expected = Right(new PathScan(SortedSet(FileSize(sub3, 3), FileSize(base2, 2)), 7, 4))
 
     actual.mustEqual(expected)
   }
 
   "Error from Filesystem" ! {
-    val emptyFs: Filesystem = MockFilesystem(directories, Map.empty)
+    val emptyFileSystemMock: Filesystem = MockFilesystem(directories, Map.empty)
 
-    val actual = runE(Scanner.scanReport(Array("base", "10")), emptyFs)
-    val expected = ???
+    val actual = runE(Scanner.scanReport(Array("base", "10")), emptyFileSystemMock)
+    val expected = Left((new IOException).toString)
 
     actual.mustEqual(expected)
   }
@@ -75,17 +86,24 @@ class ScannerSpec extends mutable.Specification {
   def runE[T](program: Eff[E, T], fs: Filesystem) =
     //there are two nested Either in the stack, one from Exceptions and one from errors raised by the program
     //we convert to a common error type String then flatten
-    program.runReader(fs).runEither.runAsync.attempt.runSyncUnsafe(3.seconds).leftMap(_.toString).flatten
+    program
+      .runReader(fs)
+      .runEither
+      .runAsync
+      .attempt
+      .runSyncUnsafe(3.seconds)
+      .leftMap(_.toString)
+      .flatten
 
   "Error - Report with non-numeric input" ! {
-    val actual = runE(Scanner.scanReport(Array("base", "not a number")), fs)
+    val actual = runE(Scanner.scanReport(Array("base", "not a number")), fileSystemMock)
     val expected = Left("Number of files must be numeric: not a number")
 
     actual.mustEqual(expected)
   }
 
   "Error - Report with non-positive input" ! {
-    val actual = runE(Scanner.scanReport(Array("base", "-1")), fs)
+    val actual = runE(Scanner.scanReport(Array("base", "-1")), fileSystemMock)
     val expected = Left("Invalid number of files -1")
 
     actual.mustEqual(expected)

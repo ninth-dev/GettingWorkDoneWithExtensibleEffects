@@ -26,7 +26,6 @@ import EffTypes._
 
 import scala.concurrent.duration._
 
-
 object Scanner {
   val Usage = "Scanner <path> [number of largest files to track]"
 
@@ -36,57 +35,80 @@ object Scanner {
 
   def main(args: Array[String]): Unit = {
     val program = scanReport[R](args)
-    
-    program.runReader(DefaultFilesystem: Filesystem).runEither.runAsync.runSyncUnsafe(1.minute) match {
+      .runReader(DefaultFilesystem: Filesystem)
+      .runEither
+      .runAsync
+      .attempt
+      .runSyncUnsafe(1.minute)
+      .leftMap(_.toString)
+      .flatten
+
+    program match {
       case Right(report) => println(report)
-      case Left(msg) => println(s"Scan failed: $msg")
+      case Left(msg)     => println(s"Scan failed: $msg")
     }
   }
 
-  def scanReport[R: _task: _filesystem](args: Array[String]): Eff[R, String] = for {
-    base <- optionEither(args.lift(0), s"Path to scan must be specified.\n$Usage")
+  def scanReport[R: _task: _filesystem: _err](args: Array[String]): Eff[R, String] =
+    for {
+      base <- optionEither(args.lift(0), s"Path to scan must be specified.\n$Usage")
+      topN <- {
+        val n = args.lift(1).getOrElse("10")
+        fromEither(n.parseInt.leftMap(_ => s"Number of files must be numeric: $n"))
+      }
+      topNValid <- {
+        if (topN <= 0)
+          left("Invalid number of files -1")
+        else
+          // this is the same as toEffPureOps(topN).pureEff[R]
+          // it is an implicit given by Eff framework to lift the value into a Effect
+          topN.pureEff[R]
+      }
 
-    topN <- {
-      val n = args.lift(1).getOrElse("10")
-      fromEither(n.parseInt.leftMap(_ => s"Number of files must be numeric: $n"))
+      fs <- ask[R, Filesystem]
+
+      scan <- {
+        // here we are extending the effect stack of R
+        // we are prepend the R with Reader
+        // however we are also interpreting the effect here, rather than at the end
+        // which means pathScan will return us with Eff[R, PathScan]
+        type S = Fx.prepend[Reader[ScanConfig, ?], R]
+        pathScan[S](fs.filePath(base))
+          .runReader[ScanConfig](ScanConfig(topNValid))
+      }
+
+    } yield ReportFormat.largeFilesReport(scan, base.toString)
+
+  def pathScan[R: _task: _filesystem: _config](path: FilePath): Eff[R, PathScan] =
+    path match {
+      case f: File =>
+        for {
+          fs <- FileSize.ofFile(f)
+        } yield PathScan(SortedSet(fs), fs.size, 1)
+      case dir: Directory =>
+        for {
+          filesystem <- ask[R, Filesystem]
+          topN <- takeTopN
+          fileList <- taskDelay(filesystem.listFiles(dir))
+          childScans <- fileList.traverse(pathScan[R](_))
+        } yield childScans.combineAll(topN)
+      case Other(_) =>
+        PathScan.empty.pureEff[R]
     }
-    topNValid <- ???
 
-    fs <- ask[R, Filesystem]
+  def takeTopN[R: _config]: Eff[R, Monoid[PathScan]] =
+    for {
+      scanConfig <- ask[R, ScanConfig]
+    } yield
+      new Monoid[PathScan] {
+        def empty: PathScan = PathScan.empty
 
-    scan <- pathScan[Fx.prepend[Reader[ScanConfig, ?], R]](fs.filePath(base)).
-      runReader[ScanConfig](ScanConfig(topNValid))
-
-  } yield ReportFormat.largeFilesReport(scan, base.toString)
-
-  def pathScan[R: _task: _filesystem: _config](path: FilePath): Eff[R, PathScan] = path match {
-    case f: File =>
-      for {
-        fs <- FileSize.ofFile(f)
-      } yield PathScan(SortedSet(fs), fs.size, 1)
-    case dir: Directory =>
-      for {
-        filesystem <- ask[R, Filesystem]
-        topN <- takeTopN
-        fileList <- taskDelay(filesystem.listFiles(dir))
-        childScans <- fileList.traverse(pathScan[R](_))
-      } yield childScans.combineAll(topN)
-    case Other(_) =>
-      PathScan.empty.pureEff[R]
-  }
-
-
-  def takeTopN[R: _config]: Eff[R, Monoid[PathScan]] = for {
-    scanConfig <- ask
-  } yield new Monoid[PathScan] {
-    def empty: PathScan = PathScan.empty
-
-    def combine(p1: PathScan, p2: PathScan): PathScan = PathScan(
-      p1.largestFiles.union(p2.largestFiles).take(scanConfig.topN),
-      p1.totalSize + p2.totalSize,
-      p1.totalCount + p2.totalCount
-    )
-  }
+        def combine(p1: PathScan, p2: PathScan): PathScan = PathScan(
+          p1.largestFiles.union(p2.largestFiles).take(scanConfig.topN),
+          p1.totalSize + p2.totalSize,
+          p1.totalCount + p2.totalCount
+        )
+      }
 
 }
 
@@ -113,11 +135,16 @@ case object DefaultFilesystem extends Filesystem {
 
   def listFiles(directory: Directory) = {
     val files = Files.list(Paths.get(directory.path))
-    try files.toScala[List].flatMap(path => filePath(path.toString) match {
-      case Directory(path) => List(Directory(path))
-      case File(path) => List(File(path))
-      case Other(path) => List.empty
-    })
+    try files
+      .toScala[List]
+      .flatMap(
+        path =>
+          filePath(path.toString) match {
+            case Directory(path) => List(Directory(path))
+            case File(path)      => List(File(path))
+            case Other(path)     => List.empty
+        }
+      )
     finally files.close()
   }
 
@@ -137,21 +164,20 @@ case class FileSize(file: File, size: Long)
 
 object FileSize {
 
-  def ofFile[R: _filesystem](file: File): Eff[R, FileSize] = for {
-    fs <- ask
-  } yield  FileSize(file, fs.length(file))
+  def ofFile[R: _filesystem](file: File): Eff[R, FileSize] =
+    for {
+      fs <- ask
+    } yield FileSize(file, fs.length(file))
 
   implicit val ordering: Ordering[FileSize] = Ordering.by[FileSize, Long](_.size).reverse
 
 }
 
 object EffTypes {
-
   type _filesystem[R] = Reader[Filesystem, ?] <= R
   type _config[R] = Reader[ScanConfig, ?] <= R
   type _err[R] = Either[String, ?] <= R
 }
-
 
 //I prefer an closed set of disjoint cases over a series of isX(): Boolean tests, as provided by the Java API
 //The problem with boolean test methods is they make it unclear what the complete set of possible states is, and which tests
@@ -170,10 +196,13 @@ object ReportFormat {
   def largeFilesReport(scan: PathScan, rootDir: String): String = {
     if (scan.largestFiles.nonEmpty) {
       s"Largest ${scan.largestFiles.size} file(s) found under path: $rootDir\n" +
-        scan.largestFiles.map(fs => s"${(fs.size * 100)/scan.totalSize}%  ${formatByteString(fs.size)}  ${fs.file}").mkString("", "\n", "\n") +
+        scan.largestFiles
+          .map(
+            fs => s"${(fs.size * 100) / scan.totalSize}%  ${formatByteString(fs.size)}  ${fs.file}"
+          )
+          .mkString("", "\n", "\n") +
         s"${scan.totalCount} total files found, having total size ${formatByteString(scan.totalSize)} bytes.\n"
-    }
-    else
+    } else
       s"No files found under path: $rootDir"
   }
 
